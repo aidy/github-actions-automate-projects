@@ -14,16 +14,6 @@ import (
 )
 
 func main() {
-	// Event name is kept in GITHUB_EVENT_NAME
-	// https://help.github.com/en/articles/virtual-environments-for-github-actions#default-environment-variables
-	eventName := os.Getenv("GITHUB_EVENT_NAME")
-	infoLog("Event name: %s\n", eventName)
-	if !(eventName == "issues" || eventName == "pull_request") {
-		infoLog("This GitHub event is neither issues nor pull_requests. Stop executing this action.")
-		infoLog("Please add 'if github.event_name' to the workflow yaml by following https://github.com/takanabe/github-actions-automate-projects/blob/master/README.md ")
-		os.Exit(0)
-	}
-
 	var err error
 	client, ctx := getGitHubClient()
 
@@ -42,22 +32,7 @@ func main() {
 	errCheck(err)
 
 	// eventID stores issue ID or pull-request ID
-	var eventID int64
 	var projectCards []*github.ProjectCard
-	if eventName == "issues" {
-		payload := issueEventPayload()
-		eventID, err = extractIssueID(payload)
-		errCheck(err)
-		projectCards, err = getProjectCardsFromIssue(ctx, client, payload.Issue, parentResource, parentName)
-		errCheck(err)
-	} else if eventName == "pull_request" {
-		payload := pullRequestEventPayload()
-		eventID, err = extractPullRequestID(payload)
-		errCheck(err)
-	}
-
-	infoLog("Payload for %s extract correctly", eventName)
-	debugLog("Target event ID: %d\n", eventID)
 
 	var pjID int64
 	if pjType == "repository" {
@@ -72,39 +47,31 @@ func main() {
 	}
 	infoLog("Project type:%s\n", pjType)
 
+	fromColumn := os.Getenv("GITHUB_PROJECT_FROM_COLUMN")
+	if fromColumn == "" {
+		errorLog(errors.New("Environment variable PROJECT_COLUMN_NAME is not defined in your workflow file"))
+		os.Exit(1)
+	}
 	pjColumn := os.Getenv("GITHUB_PROJECT_COLUMN_NAME")
 	if pjColumn == "" {
 		errorLog(errors.New("Environment variable PROJECT_COLUMN_NAME is not defined in your workflow file"))
 		os.Exit(1)
 	}
 
+	fromColumnID, err := projectColumnID(ctx, client, pjID, fromColumn)
+	errCheck(err)
 	columnID, err := projectColumnID(ctx, client, pjID, pjColumn)
 	errCheck(err)
 
-	for _, card := range projectCards {
-		if *card.ProjectID == pjID {
-			// Check card still exists
-			// Ignore errors - if the card has been deleted, we want to respect the workflow and create it
-			c, _, _ := client.Projects.GetProjectCard(ctx, *card.ID)
-			if c == nil {
-				continue
-			}
-			infoLog("Project card is being moved to column %s\n", pjColumn)
-			err = moveCardInProject(ctx, client, columnID, card)
-			errCheck(err)
-			os.Exit(0)
-		}
-	}
-
-	infoLog("Project card is being added to column %s\n", pjColumn)
-
-	////
-	// Add a new opened issue to a designate project column
-	////
-	err = addToProject(ctx, client, eventID, columnID, eventName)
+	projectCards, err = getProjectCards(ctx, client, fromColumnID)
 	errCheck(err)
 
-	os.Exit(0)
+	for _, card := range projectCards {
+		infoLog("Project card is being moved to column %s\n", pjColumn)
+		err = moveCardInProject(ctx, client, columnID, card)
+		errCheck(err)
+	}
+
 }
 
 func getGitHubClient() (*github.Client, context.Context) {
@@ -311,4 +278,13 @@ func moveCardInProject(ctx context.Context, client *github.Client, columnID int6
 		return err
 	}
 	return nil
+}
+
+func getProjectCards(ctx context.Context, client *github.Client, columnID int64) ([]*github.ProjectCard, error) {
+	cards, resp, err := client.Projects.ListProjectCards(ctx, columnID, &github.ProjectCardListOptions{ListOptions: github.ListOptions{PerPage: 100}})
+	err = validateGitHubResponse(resp, err)
+	if err != nil {
+		return []*github.ProjectCard{}, err
+	}
+	return cards, nil
 }
